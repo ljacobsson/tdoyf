@@ -21,6 +21,68 @@ faceFileInput?.addEventListener('change', () => {
   splashEl?.classList.remove('show');
 });
 
+// Mobile controls
+const mobileControlsEl = document.getElementById('mobileControls');
+const stickLEl = document.getElementById('stickL');
+const stickREl = document.getElementById('stickR');
+const knobL = stickLEl?.querySelector('.knob');
+const knobR = stickREl?.querySelector('.knob');
+const btnShoot = document.getElementById('btnShoot');
+const btnJump = document.getElementById('btnJump');
+const isCoarse = window.matchMedia('(pointer: coarse)').matches;
+if (isCoarse) mobileControlsEl?.classList.remove('hidden');
+let mobileMove = { x: 0, y: 0 };
+let mobileLook = { x: 0, y: 0 };
+
+function bindStick(stickEl, knobEl, onMove) {
+  if (!stickEl || !knobEl) return;
+  let active = false;
+  let center = { x: 0, y: 0 };
+  const radius = 70;
+
+  function updateKnob(dx, dy) {
+    const len = Math.hypot(dx, dy);
+    const clamped = Math.min(1, len / radius);
+    const angle = Math.atan2(dy, dx);
+    const kx = Math.cos(angle) * clamped * radius;
+    const ky = Math.sin(angle) * clamped * radius;
+    knobEl.style.transform = `translate(${kx}px, ${ky}px)`;
+    onMove({ x: clamped * Math.cos(angle), y: clamped * Math.sin(angle) });
+  }
+
+  function reset() {
+    knobEl.style.transform = 'translate(-50%, -50%)';
+    onMove({ x: 0, y: 0 });
+  }
+
+  const start = (e) => {
+    active = true;
+    const t = e.touches ? e.touches[0] : e;
+    const rect = stickEl.getBoundingClientRect();
+    center.x = rect.left + rect.width / 2;
+    center.y = rect.top + rect.height / 2;
+    updateKnob(t.clientX - center.x, t.clientY - center.y);
+  };
+  const move = (e) => {
+    if (!active) return;
+    const t = e.touches ? e.touches[0] : e;
+    updateKnob(t.clientX - center.x, t.clientY - center.y);
+  };
+  const end = () => { active = false; reset(); };
+
+  stickEl.addEventListener('touchstart', start, { passive: true });
+  stickEl.addEventListener('touchmove', move, { passive: true });
+  stickEl.addEventListener('touchend', end);
+  stickEl.addEventListener('mousedown', start);
+  window.addEventListener('mousemove', move);
+  window.addEventListener('mouseup', end);
+}
+
+bindStick(stickLEl, knobL, (v) => { mobileMove = v; });
+bindStick(stickREl, knobR, (v) => { mobileLook = v; });
+btnShoot?.addEventListener('click', () => { tryShoot(); });
+btnJump?.addEventListener('click', () => { keys.add('Space'); setTimeout(() => keys.delete('Space'), 120); });
+
 // --- Renderer & Scene ---
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -36,6 +98,10 @@ scene.add(camera);
 
 const controls = new PointerLockControls(camera, renderer.domElement);
 scene.add(controls.getObject());
+
+// For mobile look, rotate yaw/pitch manually when not pointer-locked
+let manualYaw = 0;
+let manualPitch = 0;
 
 // Player gun (FPS viewmodel)
 let playerGun = null;
@@ -680,14 +746,20 @@ window.addEventListener('keydown', (e) => { keys.add(e.code); });
 window.addEventListener('keyup', (e) => { keys.delete(e.code); });
 
 startBtn.addEventListener('click', () => {
-  controls.lock();
+  if (isCoarse) {
+    // On mobile, don’t lock pointer; show controls
+    controls.unlock();
+  } else {
+    controls.lock();
+  }
 });
 
 controls.addEventListener('lock', () => {
   setStatus('Mouse locked. Left-click to shoot. WASD to move, Space to jump, Esc to release.');
 });
 controls.addEventListener('unlock', () => {
-  setStatus('Mouse unlocked. Click Play to lock again.');
+  if (isCoarse) setStatus('Touch sticks to move/look. Buttons to shoot/jump.');
+  else setStatus('Mouse unlocked. Click Play to lock again.');
 });
 
 renderer.domElement.addEventListener('mousedown', (e) => {
@@ -749,19 +821,38 @@ function removeAgent(agent) {
   }
 }
 
+// Apply mobile look each frame if needed
+function applyMobileLook(dt) {
+  if (!isCoarse || isCinematic) return;
+  // Scale look speed
+  const yawSpeed = 1.8; // rad/s at full stick
+  const pitchSpeed = 1.4;
+  manualYaw += -mobileLook.x * yawSpeed * dt; // drag right -> look right
+  manualPitch += -mobileLook.y * pitchSpeed * dt;
+  manualPitch = Math.max(-Math.PI/2 + 0.1, Math.min(Math.PI/2 - 0.1, manualPitch));
+  controls.getObject().rotation.y = manualYaw;
+  camera.rotation.x = manualPitch;
+}
+
 function updatePlayer(dt) {
-  if (!controls.isLocked || isCinematic) return;
+  if (isCinematic) return;
 
   const forward = new THREE.Vector3();
-  controls.getDirection(forward);
-  forward.y = 0; forward.normalize();
-  const right = new THREE.Vector3().crossVectors(forward, new THREE.Vector3(0,1,0)).normalize();
+  const up = new THREE.Vector3(0,1,0);
+  if (controls.isLocked && !isCoarse) {
+    controls.getDirection(forward);
+    forward.y = 0; forward.normalize();
+  } else {
+    // Build forward from manual yaw when not pointer-locked (mobile)
+    forward.set(Math.sin(controls.getObject().rotation.y), 0, Math.cos(controls.getObject().rotation.y)).negate();
+  }
+  const right = new THREE.Vector3().crossVectors(forward, up).normalize();
 
   moveVelocity.set(0, 0, 0);
-  if (keys.has('KeyW')) moveVelocity.add(forward);
-  if (keys.has('KeyS')) moveVelocity.addScaledVector(forward, -1);
-  if (keys.has('KeyA')) moveVelocity.addScaledVector(right, -1);
-  if (keys.has('KeyD')) moveVelocity.add(right);
+  if (keys.has('KeyW') || (isCoarse && mobileMove.y < 0)) moveVelocity.addScaledVector(forward, Math.abs(mobileMove.y) || 1);
+  if (keys.has('KeyS') || (isCoarse && mobileMove.y > 0)) moveVelocity.addScaledVector(forward, -Math.abs(mobileMove.y) || -1);
+  if (keys.has('KeyA') || (isCoarse && mobileMove.x < 0)) moveVelocity.addScaledVector(right, -(Math.abs(mobileMove.x) || 1));
+  if (keys.has('KeyD') || (isCoarse && mobileMove.x > 0)) moveVelocity.addScaledVector(right, (Math.abs(mobileMove.x) || 1));
   if (moveVelocity.lengthSq() > 0) moveVelocity.normalize().multiplyScalar(playerSpeed * dt);
 
   const currentPos = controls.getObject().position;
@@ -779,7 +870,6 @@ function updatePlayer(dt) {
       jumpVelocity = 10;
       isOnGround = false;
     } else {
-      // Stick to terrain while walking; follow declines immediately
       currentPos.y = groundY;
     }
   }
@@ -800,10 +890,33 @@ faceFileInput.addEventListener('change', async (e) => {
   const file = e.target.files?.[0];
   if (!file) return;
   setStatus('Loading image…');
-  const blobURL = URL.createObjectURL(file);
-  const imageBitmap = await createImageBitmap(await fetch(blobURL).then(r => r.blob()));
-  URL.revokeObjectURL(blobURL);
-  createTerrainFromImage(imageBitmap);
+  try {
+    // Prefer direct decode from the File (works cross-origin when hosted)
+    const imageBitmap = await createImageBitmap(file);
+    await createTerrainFromImage(imageBitmap);
+  } catch (err) {
+    // Fallback path via HTMLImageElement and canvas
+    try {
+      const blobURL = URL.createObjectURL(file);
+      const img = new Image();
+      await new Promise((resolve, reject) => {
+        img.onload = resolve;
+        img.onerror = reject;
+        img.src = blobURL;
+      });
+      const c = document.createElement('canvas');
+      c.width = img.naturalWidth; c.height = img.naturalHeight;
+      const ctx2 = c.getContext('2d');
+      if (!ctx2) throw new Error('Canvas 2D context unavailable');
+      ctx2.drawImage(img, 0, 0);
+      const imageBitmap = await createImageBitmap(c);
+      URL.revokeObjectURL(blobURL);
+      await createTerrainFromImage(imageBitmap);
+    } catch (err2) {
+      console.error('Failed to load image', err, err2);
+      setStatus('Failed to load image');
+    }
+  }
 });
 
 // --- Resize ---
@@ -823,6 +936,7 @@ function animate() {
 
   shootCooldown = Math.max(0, shootCooldown - dt);
   updateCinematic(dt);
+  applyMobileLook(dt);
   updatePlayer(dt);
   updateAgents(dt);
   updateBullets(dt);

@@ -79,4 +79,49 @@ button:disabled {
   cursor: not-allowed;
 }
 
-canvas { display: block; } 
+canvas { display: block; }
+
+.hidden { display: none; }
+
+#mobileControls {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 50;
+}
+#mobileControls .stick {
+  position: absolute;
+  width: 140px;
+  height: 140px;
+  border-radius: 50%;
+  border: 1px solid rgba(255,255,255,0.15);
+  background: rgba(0,0,0,0.35);
+  pointer-events: auto;
+}
+#stickL { left: 16px; bottom: 16px; }
+#stickR { right: 16px; bottom: 16px; }
+#mobileControls .knob {
+  position: absolute;
+  left: 50%; top: 50%;
+  width: 64px; height: 64px;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.12);
+  border: 1px solid rgba(255,255,255,0.25);
+  transform: translate(-50%, -50%);
+}
+.mobile-btn {
+  position: absolute;
+  pointer-events: auto;
+  right: 16px;
+  bottom: 180px;
+  padding: 10px 14px;
+  background: rgba(0,0,0,0.55);
+  border: 1px solid rgba(255,255,255,0.2);
+  color: #e5e7eb;
+  border-radius: 10px;
+}
+.mobile-btn.primary { right: 16px; bottom: 240px; background: #4f46e5; border-color: #6366f1; }
+
+@media (pointer: coarse) and (max-width: 900px) {
+  #mobileControls.hidden { display: block; }
+} 
