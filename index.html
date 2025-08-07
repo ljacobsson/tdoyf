@@ -14,9 +14,8 @@
         }
       }
     </script>
-    <!-- TFJS depth estimation (loaded globally for simplicity). If it fails to load, app falls back to blur method. -->
+    <!-- TFJS (global). Depth model is loaded dynamically with fallbacks in main.js. -->
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js" defer></script>
-    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/depth-estimation@0.1.3/dist/depth-estimation.min.js" defer></script>
   </head>
   <body>
     <div id="splash" class="show">
@@ -49,6 +48,6 @@
       <button id="btnJump" class="mobile-btn">Jump</button>
     </div>
 
-    <script type="module" src="./main.js"></script>
+    <script type="module" src="./main.js?v=umd-004"></script>
   </body>
 </html> 

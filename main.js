@@ -1,3 +1,4 @@
+console.info('[TinyDOOM-Face] build: UMD-only depth loader active');
 import * as THREE from 'three';
 import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
 
@@ -370,33 +371,53 @@ async function createTerrainFromImage(imageBitmap) {
 
   let usedDepthML = false;
   try {
-    // Prefer globals if present; otherwise attempt dynamic ESM imports
+    // Use only jsDelivr UMD for stability
     let tfVar = window.tf;
     let deVar = window.depthEstimation || window.depth_estimation;
-    if (!tfVar) {
-      console.info('[DepthML] dynamic-import tfjs…');
-      tfVar = await import('https://esm.sh/@tensorflow/tfjs@4.20.0');
+
+    function loadScript(url) {
+      return new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = url; s.async = true; s.onload = () => resolve(true); s.onerror = reject;
+        document.head.appendChild(s);
+      });
     }
-    if (!deVar) {
-      console.info('[DepthML] dynamic-import @tensorflow-models/depth-estimation…');
-      deVar = await import('https://esm.sh/@tensorflow-models/depth-estimation@0.1.3');
+
+    if (!tfVar) {
+      console.warn('[DepthML] tfjs not found on window; skipping ML');
+    }
+
+    if (!deVar && tfVar) {
+      const url = 'https://cdn.jsdelivr.net/npm/@tensorflow-models/depth-estimation@0.0.4/dist/depth-estimation.min.js';
+      console.info('[DepthML] loading UMD', url);
+      await loadScript(url);
+      deVar = window.depthEstimation || window.depth_estimation;
+      if (!deVar) console.warn('[DepthML] UMD global not found after load');
     }
 
     console.info('[DepthML] libs available:', { hasTf: !!tfVar, hasDepthEstimation: !!deVar });
     if (tfVar && deVar) {
-      const t0 = performance.now();
       await tfVar.ready?.();
       try { await tfVar.setBackend?.('webgl'); await tfVar.ready?.(); } catch {}
       setStatus('Estimating depth (ML)…');
-      const estimator = await deVar.createEstimator(deVar.SupportedModels.ArbitraryImageSize, {});
-      console.info('[DepthML] estimator created');
+
+      // Fix: select a valid SupportedModels enum value
+      const SM = deVar.SupportedModels || {};
+      const arbitrary = SM.ARBITRARY_IMAGE_SIZE || SM.ArbitraryImageSize;
+      if (!arbitrary) {
+        console.warn('[DepthML] ARBITRARY_IMAGE_SIZE not available in this build; skipping ML to avoid MediaPipe dependency.');
+        throw new Error('ARBITRARY_IMAGE_SIZE unsupported');
+      }
+      const modelName = arbitrary;
+      console.info('[DepthML] using model', modelName);
+
+      const estimator = await deVar.createEstimator(modelName, {});
       const prediction = await estimator.estimateDepth(canvas);
       const depthTensor = await prediction.toTensor();
       const depthData = await depthTensor.data();
       const shape = depthTensor.shape; // [h, w]
       const hPixels = shape[0];
       const wPixels = shape[1];
-      console.info('[DepthML] tensor shape', { width: wPixels, height: hPixels });
 
       // Convert to height: invert depth (closer -> higher), normalize 0..1
       let minD = Infinity, maxD = -Infinity;
@@ -440,8 +461,7 @@ async function createTerrainFromImage(imageBitmap) {
         heightDataSize = size;
       }
       usedDepthML = true;
-      const ms = Math.round(performance.now() - t0);
-      console.info('[DepthML] success. Using ML depth.', { ms, width: heightDataSize, height: heightData.length / heightDataSize });
+      console.info('[DepthML] success. Using ML depth.');
       setStatus('Depth ML applied. Building terrain…');
     }
   } catch (err) {
@@ -494,7 +514,7 @@ async function createTerrainFromImage(imageBitmap) {
     heightDataSize = size;
   }
 
-  // Create texture from original image, keep aspect by fitting into square plane
+  // Create texture and mesh (unchanged below)
   const texture = new THREE.CanvasTexture(ctx.canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
   texture.needsUpdate = true;
@@ -502,26 +522,19 @@ async function createTerrainFromImage(imageBitmap) {
   const geometry = new THREE.PlaneGeometry(terrainSize, terrainSize, terrainResolution, terrainResolution);
   geometry.rotateX(-Math.PI / 2);
 
-  // Displace vertices based on height map
   const positions = geometry.attributes.position;
   const uvs = geometry.attributes.uv;
-  const displacementScale = 32; // slight tweak
+  const displacementScale = 32;
   for (let i = 0; i < positions.count; i++) {
     const u = uvs.getX(i);
     const v = uvs.getY(i);
-    const h = sampleHeightData(u, v); // 0..1
-    const y = (h - 0.5) * 2 * displacementScale; // center around 0
+    const h = sampleHeightData(u, v);
+    const y = (h - 0.5) * 2 * displacementScale;
     positions.setY(i, positions.getY(i) + y);
   }
   geometry.computeVertexNormals();
 
-  const material = new THREE.MeshStandardMaterial({
-    map: texture,
-    roughness: 0.95,
-    metalness: 0.0,
-    side: THREE.DoubleSide,
-  });
-
+  const material = new THREE.MeshStandardMaterial({ map: texture, roughness: 0.95, metalness: 0.0, side: THREE.DoubleSide });
   const mesh = new THREE.Mesh(geometry, material);
   mesh.receiveShadow = true;
   mesh.castShadow = false;
@@ -530,7 +543,7 @@ async function createTerrainFromImage(imageBitmap) {
   terrainMesh = mesh;
   scene.add(terrainMesh);
 
-  // Compute player start and run cinematic from far to "eyes"
+  // Intro setup
   playerStartPos.set(0, getHeightAt(0, 0) + eyeHeight, terrainSize * 0.35);
   const farPos = new THREE.Vector3(0, terrainSize * 0.9, terrainSize * 1.4);
   controls.getObject().position.copy(farPos);
@@ -540,11 +553,7 @@ async function createTerrainFromImage(imageBitmap) {
   startBtn.disabled = true;
   startIntroCinematic(farPos, playerStartPos, 40, 70);
 
-  if (agents.length === 0) {
-    spawnAgents(24);
-  } else {
-    for (const a of agents) placeAgentOnSurface(a, a.object.position.x, a.object.position.z, true);
-  }
+  if (agents.length === 0) spawnAgents(24); else for (const a of agents) placeAgentOnSurface(a, a.object.position.x, a.object.position.z, true);
 }
 
 function sampleHeightData(u, v) {
