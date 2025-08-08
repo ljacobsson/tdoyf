@@ -1,4 +1,13 @@
-console.info('[TinyDOOM-Face] build: UMD-only depth loader active');
+// Tunables for depth shaping and relief strength
+const DEPTH_GAMMA = 0.7;           // <1 expands near range
+const DETAIL_WEIGHT = 0.2;         // contribution of image detail on top of depth (lower = smoother)
+const DETAIL_BOOST = 1.6;          // high-pass amplification for detail
+let DISPLACEMENT_SCALE = 52;       // world height exaggeration
+let DEPTH_SIGN = -1;               // flip if features look inverted (−1 makes near areas rise)
+const SMOOTH_PASSES = 2;           // number of blur passes
+const USE_MEDIAN = true;           // remove isolated spikes before blurring
+
+console.info('[TinyDOOM-Face] build: ONNX MiDaS depth preferred');
 import * as THREE from 'three';
 import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
 
@@ -351,6 +360,66 @@ function playShotSound() {
   osc.stop(now + 0.12);
 }
 
+function playOhNo() {
+  // 50 random death quips
+  const quips = [
+    'oh no', 'ouch', 'aargh', 'bye!', 'nooo', 'yikes', 'uh oh', "I'm hit", 'that hurt', 'why me',
+    'not again', 'you got me', 'see ya', 'farewell', 'so cold', 'tell my mom', 'this is fine', 'ow', 'down I go', 'oops',
+    'dang it', 'blast', 'that stings', 'goodbye cruel world', 'what a world', 'I regret nothing', 'not today', 'sleepy time', 'whoa', 'boo',
+    'mercy', 'adios', 'ciao', 'hasta la vista', 'au revoir', 'later', 'rip me', 'zoinks', 'kaboom', 'ugh',
+    'oof', 'my spleen', 'right in the pixels', 'sayonara', 'it burns', 'fatality', 'defeated', 'out of ammo', 'game over', "I'm melting"
+  ];
+  const text = quips[Math.floor(Math.random() * quips.length)];
+  try {
+    if ('speechSynthesis' in window && typeof SpeechSynthesisUtterance !== 'undefined') {
+      const u = new SpeechSynthesisUtterance(text);
+      // slight randomization for variety
+      u.rate = 0.95 + Math.random() * 0.2;
+      u.pitch = 0.7 + Math.random() * 0.3;
+      u.volume = 0.9;
+      window.speechSynthesis.speak(u);
+      return;
+    }
+  } catch {}
+  // Fallback: simple WebAudio vowel-like tone with glide
+  const ctx = ensureAudio();
+  const now = ctx.currentTime;
+  const master = ctx.createGain();
+  master.gain.setValueAtTime(0.0001, now);
+  master.connect(ctx.destination);
+
+  const osc1 = ctx.createOscillator(); osc1.type = 'triangle';
+  const osc2 = ctx.createOscillator(); osc2.type = 'sine'; osc2.detune.value = -8;
+  const vGain = ctx.createGain();
+  vGain.connect(master);
+  osc1.connect(vGain); osc2.connect(vGain);
+
+  vGain.gain.setValueAtTime(0.0001, now);
+  vGain.gain.exponentialRampToValueAtTime(0.3, now + 0.04);
+  vGain.gain.exponentialRampToValueAtTime(0.08, now + 0.20);
+  vGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.85);
+
+  osc1.frequency.setValueAtTime(320, now);
+  osc2.frequency.setValueAtTime(320, now);
+  osc1.frequency.exponentialRampToValueAtTime(260, now + 0.18);
+  osc2.frequency.exponentialRampToValueAtTime(260, now + 0.18);
+  osc1.frequency.exponentialRampToValueAtTime(180, now + 0.75);
+  osc2.frequency.exponentialRampToValueAtTime(180, now + 0.75);
+
+  const lp = ctx.createBiquadFilter();
+  lp.type = 'lowpass';
+  lp.frequency.setValueAtTime(1800, now);
+  lp.Q.value = 0.7;
+  vGain.disconnect();
+  osc1.disconnect(); osc2.disconnect();
+  const mix = ctx.createGain();
+  osc1.connect(mix); osc2.connect(mix);
+  mix.connect(lp).connect(master);
+
+  osc1.start(now); osc2.start(now);
+  osc1.stop(now + 0.9); osc2.stop(now + 0.9);
+}
+
 // Agents
 const agents = [];
 const bullets = [];
@@ -360,8 +429,137 @@ function setStatus(text) {
   statusEl.textContent = text;
 }
 
+function median3x3(src, size) {
+  const dst = new Float32Array(src.length);
+  const w = size, h = size;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const vals = [];
+      for (let dy = -1; dy <= 1; dy++) {
+        const yy = Math.min(h - 1, Math.max(0, y + dy));
+        for (let dx = -1; dx <= 1; dx++) {
+          const xx = Math.min(w - 1, Math.max(0, x + dx));
+          vals.push(src[yy * w + xx]);
+        }
+      }
+      vals.sort((a, b) => a - b);
+      dst[y * w + x] = vals[4];
+    }
+  }
+  return dst;
+}
+
+function blurSeparable(src, size, passes = 1) {
+  const w = size, h = size;
+  let a = src, b = new Float32Array(src.length);
+  const k0 = 1 / 4, k1 = 2 / 4; // kernel [1,2,1]/4
+  for (let p = 0; p < passes; p++) {
+    // horizontal
+    for (let y = 0; y < h; y++) {
+      const row = y * w;
+      for (let x = 0; x < w; x++) {
+        const xm1 = Math.max(0, x - 1), xp1 = Math.min(w - 1, x + 1);
+        b[row + x] = k0 * a[row + xm1] + k1 * a[row + x] + k0 * a[row + xp1];
+      }
+    }
+    // vertical
+    for (let y = 0; y < h; y++) {
+      const ym1 = Math.max(0, y - 1), yp1 = Math.min(h - 1, y + 1);
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x;
+        a[i] = k0 * b[ym1 * w + x] + k1 * b[i] + k0 * b[yp1 * w + x];
+      }
+    }
+  }
+  return a;
+}
+
+async function inferDepthONNX(sourceCanvas, targetSize) {
+  if (!window.ort) throw new Error('ONNX Runtime Web not available');
+  const ort = window.ort;
+  // Avoid crossOriginIsolated requirement: force single-threaded WASM
+  try {
+    ort.env.wasm.numThreads = 1;
+    ort.env.wasm.proxy = false;
+  } catch {}
+  // MiDaS small expects 256x256 RGB normalized
+  const inputW = 256, inputH = 256;
+  const tmp = document.createElement('canvas');
+  tmp.width = inputW; tmp.height = inputH;
+  const tctx = tmp.getContext('2d');
+  tctx.drawImage(sourceCanvas, 0, 0, inputW, inputH);
+  const img = tctx.getImageData(0, 0, inputW, inputH).data;
+  // Build Float32 NHWC then transpose to NCHW as needed
+  const chw = new Float32Array(1 * 3 * inputH * inputW);
+  for (let y = 0; y < inputH; y++) {
+    for (let x = 0; x < inputW; x++) {
+      const i = (y * inputW + x) * 4;
+      const r = img[i] / 255;
+      const g = img[i + 1] / 255;
+      const b = img[i + 2] / 255;
+      const idx = y * inputW + x;
+      chw[idx] = r;               // C0
+      chw[inputW * inputH + idx] = g; // C1
+      chw[2 * inputW * inputH + idx] = b; // C2
+    }
+  }
+
+  const session = await ort.InferenceSession.create('./assets/models/midas_small_v21.onnx', { executionProviders: ['wasm'] });
+  const feeds = {};
+  // Input name varies; pick the first input
+  const inputName = session.inputNames[0];
+  feeds[inputName] = new ort.Tensor('float32', chw, [1, 3, inputH, inputW]);
+  const output = await session.run(feeds);
+  const outputName = session.outputNames[0];
+  const outTensor = output[outputName]; // shape [1,1,H,W] or [1,H,W]
+  const outData = outTensor.data;
+  let outH, outW;
+  if (outTensor.dims.length === 4) { outH = outTensor.dims[2]; outW = outTensor.dims[3]; }
+  else if (outTensor.dims.length === 3) { outH = outTensor.dims[1]; outW = outTensor.dims[2]; }
+  else throw new Error('Unexpected tensor dims');
+
+  // Robust normalize using percentiles to ignore outliers, then invert and gamma
+  const arr = Array.from(outData);
+  arr.sort((a,b)=>a-b);
+  const p = (q)=>arr[Math.max(0, Math.min(arr.length-1, Math.floor(q*(arr.length-1))))];
+  const lo = p(0.02), hi = p(0.98);
+  const invRange = Math.max(1e-6, hi - lo);
+  const out01 = new Float32Array(outData.length);
+  const gamma = DEPTH_GAMMA;
+  for (let i = 0; i < outData.length; i++) {
+    let v = (outData[i] - lo) / invRange; // 0..1
+    v = Math.max(0, Math.min(1, v));
+    v = 1 - v;                 // invert so nearer -> higher
+    v = Math.pow(v, gamma);    // gamma shape to accentuate near
+    out01[i] = v;
+  }
+
+  // Resample to targetSize x targetSize bilinearly
+  const resampled = new Float32Array(targetSize * targetSize);
+  for (let y = 0; y < targetSize; y++) {
+    const v = y / (targetSize - 1);
+    const sy = v * (outH - 1);
+    const y0 = Math.floor(sy), y1 = Math.min(outH - 1, Math.ceil(sy));
+    const ty = sy - y0;
+    for (let x = 0; x < targetSize; x++) {
+      const u = x / (targetSize - 1);
+      const sx = u * (outW - 1);
+      const x0 = Math.floor(sx), x1 = Math.min(outW - 1, Math.ceil(sx));
+      const tx = sx - x0;
+      const i00 = y0 * outW + x0;
+      const i10 = y0 * outW + x1;
+      const i01 = y1 * outW + x0;
+      const i11 = y1 * outW + x1;
+      const a = out01[i00] * (1 - tx) + out01[i10] * tx;
+      const b = out01[i01] * (1 - tx) + out01[i11] * tx;
+      resampled[y * targetSize + x] = a * (1 - ty) + b * ty;
+    }
+  }
+  return resampled;
+}
+
 async function createTerrainFromImage(imageBitmap) {
-  // Try ML depth estimation first; if it fails, fall back to blur+detail
+  // Prefer ONNX MiDaS; fallback to blur method
   const size = 512;
   const canvas = document.createElement('canvas');
   canvas.width = size;
@@ -369,188 +567,106 @@ async function createTerrainFromImage(imageBitmap) {
   const ctx = canvas.getContext('2d');
   ctx.drawImage(imageBitmap, 0, 0, size, size);
 
-  let usedDepthML = false;
+  // Keep this as the minimap background source
+  minimapSourceCanvas = canvas;
+
+  let usedML = false;
+  let depth01 = null;
   try {
-    // Use only jsDelivr UMD for stability
-    let tfVar = window.tf;
-    let deVar = window.depthEstimation || window.depth_estimation;
-
-    function loadScript(url) {
-      return new Promise((resolve, reject) => {
-        const s = document.createElement('script');
-        s.src = url; s.async = true; s.onload = () => resolve(true); s.onerror = reject;
-        document.head.appendChild(s);
-      });
+    if (window.ort) {
+      setStatus('Estimating depth (ONNX)…');
+      depth01 = await inferDepthONNX(canvas, size);
+      usedML = true;
+      console.info('[DepthONNX] success');
     }
-
-    if (!tfVar) {
-      console.warn('[DepthML] tfjs not found on window; skipping ML');
-    }
-
-    if (!deVar && tfVar) {
-      const url = 'https://cdn.jsdelivr.net/npm/@tensorflow-models/depth-estimation@0.0.4/dist/depth-estimation.min.js';
-      console.info('[DepthML] loading UMD', url);
-      await loadScript(url);
-      deVar = window.depthEstimation || window.depth_estimation;
-      if (!deVar) console.warn('[DepthML] UMD global not found after load');
-    }
-
-    console.info('[DepthML] libs available:', { hasTf: !!tfVar, hasDepthEstimation: !!deVar });
-    if (tfVar && deVar) {
-      await tfVar.ready?.();
-      try { await tfVar.setBackend?.('webgl'); await tfVar.ready?.(); } catch {}
-      setStatus('Estimating depth (ML)…');
-
-      // Fix: select a valid SupportedModels enum value
-      const SM = deVar.SupportedModels || {};
-      const arbitrary = SM.ARBITRARY_IMAGE_SIZE || SM.ArbitraryImageSize;
-      if (!arbitrary) {
-        console.warn('[DepthML] ARBITRARY_IMAGE_SIZE not available in this build; skipping ML to avoid MediaPipe dependency.');
-        throw new Error('ARBITRARY_IMAGE_SIZE unsupported');
-      }
-      const modelName = arbitrary;
-      console.info('[DepthML] using model', modelName);
-
-      const estimator = await deVar.createEstimator(modelName, {});
-      const prediction = await estimator.estimateDepth(canvas);
-      const depthTensor = await prediction.toTensor();
-      const depthData = await depthTensor.data();
-      const shape = depthTensor.shape; // [h, w]
-      const hPixels = shape[0];
-      const wPixels = shape[1];
-
-      // Convert to height: invert depth (closer -> higher), normalize 0..1
-      let minD = Infinity, maxD = -Infinity;
-      for (let i = 0; i < depthData.length; i++) {
-        const d = depthData[i];
-        if (d < minD) minD = d;
-        if (d > maxD) maxD = d;
-      }
-      const invRange = Math.max(1e-6, maxD - minD);
-      heightData = new Float32Array(depthData.length);
-      for (let i = 0; i < depthData.length; i++) {
-        const inv = 1 - (depthData[i] - minD) / invRange; // 0..1
-        heightData[i] = inv;
-      }
-      heightDataSize = wPixels;
-      depthTensor.dispose?.();
-
-      // If output size != desired size, resample onto desired grid
-      if (heightDataSize !== size) {
-        const resampled = new Float32Array(size * size);
-        for (let y = 0; y < size; y++) {
-          const v = y / (size - 1);
-          const sy = v * (hPixels - 1);
-          const y0 = Math.floor(sy), y1 = Math.min(hPixels - 1, Math.ceil(sy));
-          const ty = sy - y0;
-          for (let x = 0; x < size; x++) {
-            const u = x / (size - 1);
-            const sx = u * (wPixels - 1);
-            const x0 = Math.floor(sx), x1 = Math.min(wPixels - 1, Math.ceil(sx));
-            const tx = sx - x0;
-            const i00 = y0 * wPixels + x0;
-            const i10 = y0 * wPixels + x1;
-            const i01 = y1 * wPixels + x0;
-            const i11 = y1 * wPixels + x1;
-            const a = heightData[i00] * (1 - tx) + heightData[i10] * tx;
-            const b = heightData[i01] * (1 - tx) + heightData[i11] * tx;
-            resampled[y * size + x] = a * (1 - ty) + b * ty;
-          }
-        }
-        heightData = resampled;
-        heightDataSize = size;
-      }
-      usedDepthML = true;
-      console.info('[DepthML] success. Using ML depth.');
-      setStatus('Depth ML applied. Building terrain…');
-    }
-  } catch (err) {
-    console.warn('[DepthML] failed. Falling back to blur heightmap.', err);
+  } catch (e) {
+    console.warn('[DepthONNX] failed; using blur fallback', e);
   }
 
-  if (!usedDepthML) {
-    console.info('[DepthML] Using blur+detail fallback');
-    setStatus('Building heightmap…');
-    // Fallback: blur+detail method
-    const img = ctx.getImageData(0, 0, size, size).data;
+  // Always compute detail map from image (to blend even with ML)
+  const blurCanvas = document.createElement('canvas');
+  blurCanvas.width = size; blurCanvas.height = size;
+  const blurCtx = blurCanvas.getContext('2d');
+  blurCtx.filter = 'blur(12px)';
+  blurCtx.drawImage(canvas, 0, 0);
+  const img = ctx.getImageData(0, 0, size, size).data;
+  const blurImg = blurCtx.getImageData(0, 0, size, size).data;
+  const detail01 = new Float32Array(size * size);
+  for (let i = 0; i < size * size; i++) {
+    const r = img[i*4]/255, g = img[i*4+1]/255, b = img[i*4+2]/255;
+    const br = blurImg[i*4]/255, bg = blurImg[i*4+1]/255, bb = blurImg[i*4+2]/255;
+    const l = 0.2126*r + 0.7152*g + 0.0722*b;
+    const base = 0.2126*br + 0.7152*bg + 0.0722*bb;
+    const d = Math.max(-0.5, Math.min(0.5, (l - base) * DETAIL_BOOST));
+    detail01[i] = d + 0.5; // 0..1
+  }
 
-    const blurCanvas = document.createElement('canvas');
-    blurCanvas.width = size;
-    blurCanvas.height = size;
-    const blurCtx = blurCanvas.getContext('2d');
-    blurCtx.filter = 'blur(12px)';
-    blurCtx.drawImage(canvas, 0, 0);
-    const blurImg = blurCtx.getImageData(0, 0, size, size).data;
-
+  if (usedML && depth01) {
+    // Blend depth with detail, then clamp
+    heightData = new Float32Array(size * size);
+    for (let i = 0; i < heightData.length; i++) {
+      let h = depth01[i] + DETAIL_WEIGHT * (detail01[i] - 0.5);
+      h = Math.max(0, Math.min(1, h));
+      heightData[i] = h;
+    }
+    heightDataSize = size;
+  } else {
+    // Fallback: normalize blended base (like before) if ML missing
     heightData = new Float32Array(size * size);
     let minH = Infinity, maxH = -Infinity;
     const baseWeight = 0.85;
-    const detailWeight = 0.55;
-    const detailBoost = 1.8;
-
+    const dWeight = 0.55 * 0.7; // slightly toned down
     for (let i = 0; i < size * size; i++) {
-      const r = img[i * 4 + 0] / 255;
-      const g = img[i * 4 + 1] / 255;
-      const b = img[i * 4 + 2] / 255;
-      const l = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-
-      const br = blurImg[i * 4 + 0] / 255;
-      const bg = blurImg[i * 4 + 1] / 255;
-      const bb = blurImg[i * 4 + 2] / 255;
-      const base = 0.2126 * br + 0.7152 * bg + 0.0722 * bb;
-
-      const detail = Math.max(-0.5, Math.min(0.5, (l - base) * detailBoost));
-      let h = baseWeight * base + detailWeight * (detail + 0.5);
-
-      if (h < minH) minH = h;
-      if (h > maxH) maxH = h;
+      const br = blurImg[i*4]/255, bg = blurImg[i*4+1]/255, bb = blurImg[i*4+2]/255;
+      const base = 0.2126*br + 0.7152*bg + 0.0722*bb;
+      const h = baseWeight * base + dWeight * (detail01[i]);
+      if (h < minH) minH = h; if (h > maxH) maxH = h;
       heightData[i] = h;
     }
-
     const range = Math.max(1e-5, maxH - minH);
-    for (let i = 0; i < heightData.length; i++) {
-      heightData[i] = (heightData[i] - minH) / range;
-    }
+    for (let i = 0; i < heightData.length; i++) heightData[i] = (heightData[i] - minH) / range;
     heightDataSize = size;
   }
 
-  // Create texture and mesh (unchanged below)
+  // Smoothing to reduce spikes
+  if (USE_MEDIAN) heightData = median3x3(heightData, size);
+  heightData = blurSeparable(heightData, size, SMOOTH_PASSES);
+  // Re-normalize to 0..1 after smoothing
+  {
+    let minV = Infinity, maxV = -Infinity;
+    for (let i = 0; i < heightData.length; i++) { const v = heightData[i]; if (v < minV) minV = v; if (v > maxV) maxV = v; }
+    const range = Math.max(1e-6, maxV - minV);
+    for (let i = 0; i < heightData.length; i++) heightData[i] = (heightData[i] - minV) / range;
+  }
+
+  // Construct mesh from heightData
   const texture = new THREE.CanvasTexture(ctx.canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
   texture.needsUpdate = true;
 
   const geometry = new THREE.PlaneGeometry(terrainSize, terrainSize, terrainResolution, terrainResolution);
   geometry.rotateX(-Math.PI / 2);
-
   const positions = geometry.attributes.position;
   const uvs = geometry.attributes.uv;
-  const displacementScale = 32;
+  const displacementScale = DISPLACEMENT_SCALE;
   for (let i = 0; i < positions.count; i++) {
     const u = uvs.getX(i);
     const v = uvs.getY(i);
     const h = sampleHeightData(u, v);
-    const y = (h - 0.5) * 2 * displacementScale;
-    positions.setY(i, positions.getY(i) + y);
+    positions.setY(i, positions.getY(i) + (h - 0.5) * 2 * displacementScale * DEPTH_SIGN);
   }
   geometry.computeVertexNormals();
 
   const material = new THREE.MeshStandardMaterial({ map: texture, roughness: 0.95, metalness: 0.0, side: THREE.DoubleSide });
   const mesh = new THREE.Mesh(geometry, material);
-  mesh.receiveShadow = true;
-  mesh.castShadow = false;
-
   if (terrainMesh) scene.remove(terrainMesh);
-  terrainMesh = mesh;
-  scene.add(terrainMesh);
+  terrainMesh = mesh; scene.add(terrainMesh);
 
-  // Intro setup
   playerStartPos.set(0, getHeightAt(0, 0) + eyeHeight, terrainSize * 0.35);
   const farPos = new THREE.Vector3(0, terrainSize * 0.9, terrainSize * 1.4);
   controls.getObject().position.copy(farPos);
-  camera.fov = 40;
-  camera.updateProjectionMatrix();
-  setStatus('Playing intro…');
-  startBtn.disabled = true;
+  camera.fov = 40; camera.updateProjectionMatrix();
+  setStatus('Playing intro…'); startBtn.disabled = true;
   startIntroCinematic(farPos, playerStartPos, 40, 70);
 
   if (agents.length === 0) spawnAgents(24); else for (const a of agents) placeAgentOnSurface(a, a.object.position.x, a.object.position.z, true);
@@ -580,8 +696,8 @@ function getHeightAt(x, z) {
   const u = (x + terrainSize / 2) / terrainSize;
   const v = 1 - (z + terrainSize / 2) / terrainSize;
   const h01 = sampleHeightData(u, v); // 0..1
-  const scale = 30;
-  const y = (h01 - 0.5) * 2 * scale;
+  const scale = DISPLACEMENT_SCALE;
+  const y = (h01 - 0.5) * 2 * scale * DEPTH_SIGN;
   return y;
 }
 
@@ -827,6 +943,7 @@ function removeAgent(agent) {
     agents.splice(idx, 1);
     kills += 1;
     setStatus(`Kills: ${kills} | Enemies: ${agents.length}`);
+    playOhNo(); // Call the new function here
   }
 }
 
@@ -898,6 +1015,8 @@ function updatePlayer(dt) {
 faceFileInput.addEventListener('change', async (e) => {
   const file = e.target.files?.[0];
   if (!file) return;
+  // Ensure camera overlay is closed if it was open
+  try { closeCamera(); } catch {}
   setStatus('Loading image…');
   try {
     // Prefer direct decode from the File (works cross-origin when hosted)
@@ -935,6 +1054,93 @@ window.addEventListener('resize', () => {
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
+// Minimap elements
+const minimapCanvas = document.getElementById('minimap');
+let minimapCtx = minimapCanvas ? minimapCanvas.getContext('2d') : null;
+let minimapPixelSize = 180;
+let minimapSourceCanvas = null; // will hold the 512x512 image canvas used for texture
+
+function initMinimapCanvas() {
+  if (!minimapCanvas || !minimapCtx) return;
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  const cssW = parseInt(getComputedStyle(minimapCanvas).width, 10) || 180;
+  const cssH = parseInt(getComputedStyle(minimapCanvas).height, 10) || 180;
+  minimapCanvas.width = Math.round(cssW * dpr);
+  minimapCanvas.height = Math.round(cssH * dpr);
+  minimapPixelSize = Math.min(minimapCanvas.width, minimapCanvas.height);
+  minimapCtx.imageSmoothingEnabled = true;
+}
+initMinimapCanvas();
+window.addEventListener('resize', initMinimapCanvas);
+
+function drawMinimap() {
+  if (!minimapCanvas || !minimapCtx) return;
+  minimapCtx.clearRect(0, 0, minimapCanvas.width, minimapCanvas.height);
+  const w = minimapCanvas.width;
+  const h = minimapCanvas.height;
+
+  // Background: draw the face image as-is (no flip)
+  if (minimapSourceCanvas) {
+    minimapCtx.globalAlpha = 0.95;
+    minimapCtx.drawImage(minimapSourceCanvas, 0, 0, w, h);
+    minimapCtx.globalAlpha = 1;
+  } else {
+    minimapCtx.fillStyle = 'rgba(0,0,0,0.5)';
+    minimapCtx.fillRect(0, 0, w, h);
+  }
+
+  // Helper: map world (x,z) to pixel (mx,my) so increasing world Z moves the dot DOWN (south)
+  const worldToMap = (x, z) => {
+    const u = (x + terrainSize / 2) / terrainSize;
+    const v = (z + terrainSize / 2) / terrainSize;
+    const mx = u * w;
+    const my = v * h; // world +Z => canvas +Y (down)
+    return [mx, my];
+  };
+
+  // Draw agents
+  minimapCtx.lineWidth = Math.max(1, w * 0.006);
+  for (const a of agents) {
+    const [mx, my] = worldToMap(a.object.position.x, a.object.position.z);
+    minimapCtx.fillStyle = '#ff6b6b';
+    minimapCtx.strokeStyle = 'rgba(0,0,0,0.6)';
+    minimapCtx.beginPath();
+    minimapCtx.arc(mx, my, w * 0.015, 0, Math.PI * 2);
+    minimapCtx.fill();
+    minimapCtx.stroke();
+  }
+
+  // Draw player and facing
+  const px = controls.getObject().position.x;
+  const pz = controls.getObject().position.z;
+  const [pmx, pmy] = worldToMap(px, pz);
+  minimapCtx.fillStyle = '#66ccff';
+  minimapCtx.strokeStyle = 'rgba(0,0,0,0.6)';
+  minimapCtx.beginPath();
+  minimapCtx.arc(pmx, pmy, w * 0.018, 0, Math.PI * 2);
+  minimapCtx.fill();
+  minimapCtx.stroke();
+
+  // Facing arrow: use positive dir.z to move arrow DOWN (south) on the map
+  const dir = new THREE.Vector3();
+  controls.getDirection(dir);
+  const pxPerWorld = w / terrainSize;
+  const arrowWorldLen = terrainSize * 0.12;
+  const dx = dir.x * arrowWorldLen * pxPerWorld;
+  const dy = dir.z * arrowWorldLen * pxPerWorld; // +Z => canvas down
+  minimapCtx.strokeStyle = '#66ccff';
+  minimapCtx.lineWidth = Math.max(2, w * 0.01);
+  minimapCtx.beginPath();
+  minimapCtx.moveTo(pmx, pmy);
+  minimapCtx.lineTo(pmx + dx, pmy + dy);
+  minimapCtx.stroke();
+
+  // Border
+  minimapCtx.strokeStyle = 'rgba(255,255,255,0.3)';
+  minimapCtx.lineWidth = Math.max(1, w * 0.01);
+  minimapCtx.strokeRect(0.5 * minimapCtx.lineWidth, 0.5 * minimapCtx.lineWidth, w - minimapCtx.lineWidth, h - minimapCtx.lineWidth);
+}
+
 // --- Animation loop ---
 let lastTime = performance.now();
 function animate() {
@@ -951,6 +1157,7 @@ function animate() {
   updateBullets(dt);
   updateEffects(dt);
   updateGun(dt);
+  drawMinimap();
 
   renderer.render(scene, camera);
 }
@@ -966,4 +1173,55 @@ animate();
 
   camera.position.set(0, 30, 120);
   camera.lookAt(0, 0, 0);
-})(); 
+})();
+
+// Camera capture elements
+const cameraBtn = document.getElementById('splashCameraBtn');
+const cameraOverlay = document.getElementById('cameraOverlay');
+const cameraVideo = document.getElementById('cameraVideo');
+const cameraCaptureBtn = document.getElementById('cameraCaptureBtn');
+const cameraCancelBtn = document.getElementById('cameraCancelBtn');
+let cameraStream = null;
+
+async function openCamera() {
+  try {
+    const constraints = { video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 960 } }, audio: false };
+    cameraStream = await navigator.mediaDevices.getUserMedia(constraints);
+    cameraVideo.srcObject = cameraStream;
+    cameraOverlay.classList.remove('hidden');
+    splashEl?.classList.remove('show');
+  } catch (e) {
+    console.warn('Camera open failed', e);
+    // Fallback to file picker
+    faceFileInput?.click();
+  }
+}
+function closeCamera() {
+  if (cameraStream) {
+    cameraStream.getTracks().forEach(t => t.stop());
+    cameraStream = null;
+  }
+  cameraVideo.srcObject = null;
+  cameraOverlay.classList.add('hidden');
+}
+
+async function captureCameraFrame() {
+  if (!cameraVideo.videoWidth || !cameraVideo.videoHeight) return;
+  const maxDim = 1024;
+  const ar = cameraVideo.videoWidth / cameraVideo.videoHeight;
+  const w = ar >= 1 ? maxDim : Math.round(maxDim * ar);
+  const h = ar >= 1 ? Math.round(maxDim / ar) : maxDim;
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const cx = c.getContext('2d');
+  // Mirror for front camera
+  cx.translate(w, 0); cx.scale(-1, 1);
+  cx.drawImage(cameraVideo, 0, 0, w, h);
+  const bitmap = await createImageBitmap(c);
+  closeCamera();
+  await createTerrainFromImage(bitmap);
+}
+
+cameraBtn?.addEventListener('click', openCamera);
+cameraCancelBtn?.addEventListener('click', closeCamera);
+cameraCaptureBtn?.addEventListener('click', captureCameraFrame); 
