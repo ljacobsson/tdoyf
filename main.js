@@ -576,6 +576,9 @@ function setStatus(text) {
 function updateGameHud() {
   setStatus(`HP: ${playerHP} | Kills: ${kills} | Enemies: ${agents.length}`);
 }
+function randomDamage(min = 1, max = 5) {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
 
 function median3x3(src, size) {
   const dst = new Float32Array(src.length);
@@ -1242,8 +1245,9 @@ function updateAgents(dt) {
     const playerPos = controls.getObject().position;
     const distToPlayer = pos.distanceTo(playerPos);
     if (distToPlayer < 2.2 && a.contactCooldown <= 0 && !isDead) {
-      playerHP = Math.max(0, playerHP - 1);
+      playerHP = Math.max(0, playerHP - randomDamage());
       a.contactCooldown = 0.35;
+      flashHitBorder();
       updateGameHud();
       if (playerHP <= 0 && !isDead) {
         isDead = true;
@@ -1528,7 +1532,8 @@ function enemyTryShoot(agent) {
 
   fireBullet(start, end, 0x66ffcc, 0.1, 'enemy');
   playEnemyZapSound();
-  playerHP = Math.max(0, playerHP - 1);
+  playerHP = Math.max(0, playerHP - randomDamage());
+  flashHitBorder();
   updateGameHud();
   if (playerHP <= 0 && !isDead) {
     isDead = true;
@@ -1771,6 +1776,13 @@ const endModal = document.getElementById('endModal');
 const endTitle = document.getElementById('endTitle');
 const endSubtitle = document.getElementById('endSubtitle');
 const endCta = document.getElementById('endCta');
+const hitBorderEl = document.getElementById('hitBorder');
+
+function flashHitBorder() {
+  if (!hitBorderEl) return;
+  hitBorderEl.classList.add('show');
+  setTimeout(() => hitBorderEl.classList.remove('show'), 150);
+}
 
 function showEndModal(title, subtitle) {
   try { controls.unlock(); } catch {}

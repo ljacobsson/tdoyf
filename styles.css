@@ -315,3 +315,16 @@ canvas { display: block; }
   box-shadow: 0 12px 50px rgba(0,0,0,0.45);
   border-radius: 10px;
 } 
+
+#hitBorder {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  border: 5px solid rgba(255, 0, 0, 0);
+  box-sizing: border-box;
+  z-index: 1100;
+  transition: border-color 120ms ease;
+}
+#hitBorder.show {
+  border-color: rgba(255, 0, 0, 0.9);
+} 
