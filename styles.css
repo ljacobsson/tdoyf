@@ -298,3 +298,20 @@ canvas { display: block; }
   box-shadow: 0 8px 30px rgba(56, 189, 248, 0.35), 0 0 0 3px rgba(56,189,248,0.22) inset;
 }
 #endCta.primary:active { transform: translateY(1px); } 
+
+#processingOverlay.hidden { display: none !important; }
+#processingOverlay {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: #000; /* solid to mask scene until ready */
+  z-index: 950; /* above scene, below modals */
+}
+#processingCanvas {
+  display: block;
+  max-width: 92vw;
+  max-height: 92vh;
+  box-shadow: 0 12px 50px rgba(0,0,0,0.45);
+  border-radius: 10px;
+} 

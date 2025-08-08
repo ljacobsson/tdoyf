@@ -20,6 +20,8 @@ const statusEl = document.getElementById('status');
 const splashEl = document.getElementById('splash');
 const splashUploadBtn = document.getElementById('splashUploadBtn');
 const enterBtn = document.getElementById('enterBtn');
+const processingOverlay = document.getElementById('processingOverlay');
+const processingCanvas = document.getElementById('processingCanvas');
 
 // Hide the Play button permanently; click anywhere to lock instead
 if (startBtn) { startBtn.disabled = true; startBtn.style.display = 'none'; }
@@ -704,88 +706,126 @@ async function inferDepthONNX(sourceCanvas, targetSize) {
   return resampled;
 }
 
+function showProcessingImageFromBitmap(bitmap) {
+  if (!processingOverlay || !processingCanvas) return;
+  const ctx = processingCanvas.getContext('2d');
+  const vw = window.innerWidth, vh = window.innerHeight;
+  // Match intro framing: image centered, roughly contained in 70vw x 70vh box (like splash)
+  const maxW = Math.min(vw * 0.7, 900);
+  const maxH = Math.min(vh * 0.7, 900);
+  const ar = bitmap.width / bitmap.height;
+  let cw = maxW, ch = cw / ar;
+  if (ch > maxH) { ch = maxH; cw = ch * ar; }
+  processingCanvas.width = Math.round(cw);
+  processingCanvas.height = Math.round(ch);
+  ctx.clearRect(0, 0, processingCanvas.width, processingCanvas.height);
+  ctx.drawImage(bitmap, 0, 0, processingCanvas.width, processingCanvas.height);
+  processingOverlay.classList.remove('hidden');
+}
+function hideProcessingImage() {
+  processingOverlay?.classList.add('hidden');
+}
+
 async function createTerrainFromImage(imageBitmap) {
-  // Prefer ONNX MiDaS; fallback to blur method
+  // Show processing image overlay
+  showProcessingImageFromBitmap(imageBitmap);
+  try {
+    // Prefer ONNX MiDaS; fallback to blur method
+    const size = 512;
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(imageBitmap, 0, 0, size, size);
+
+    // Keep this as the minimap background source
+    minimapSourceCanvas = canvas;
+
+    let usedML = false;
+    let depth01 = null;
+    try {
+      if (window.ort) {
+        setStatus('Estimating depth (ONNX)…');
+        depth01 = await inferDepthONNX(canvas, size);
+        usedML = true;
+        console.info('[DepthONNX] success');
+      }
+    } catch (e) {
+      console.warn('[DepthONNX] failed; using blur fallback', e);
+    }
+
+    // Always compute detail map from image (to blend even with ML)
+    const blurCanvas = document.createElement('canvas');
+    blurCanvas.width = size; blurCanvas.height = size;
+    const blurCtx = blurCanvas.getContext('2d');
+    blurCtx.filter = 'blur(12px)';
+    blurCtx.drawImage(canvas, 0, 0);
+    const img = ctx.getImageData(0, 0, size, size).data;
+    const blurImg = blurCtx.getImageData(0, 0, size, size).data;
+    const detail01 = new Float32Array(size * size);
+    for (let i = 0; i < size * size; i++) {
+      const r = img[i*4]/255, g = img[i*4+1]/255, b = img[i*4+2]/255;
+      const br = blurImg[i*4]/255, bg = blurImg[i*4+1]/255, bb = blurImg[i*4+2]/255;
+      const l = 0.2126*r + 0.7152*g + 0.0722*b;
+      const base = 0.2126*br + 0.7152*bg + 0.0722*bb;
+      const d = Math.max(-0.5, Math.min(0.5, (l - base) * DETAIL_BOOST));
+      detail01[i] = d + 0.5; // 0..1
+    }
+
+    if (usedML && depth01) {
+      // Blend depth with detail, then clamp
+      heightData = new Float32Array(size * size);
+      for (let i = 0; i < heightData.length; i++) {
+        let h = depth01[i] + DETAIL_WEIGHT * (detail01[i] - 0.5);
+        h = Math.max(0, Math.min(1, h));
+        heightData[i] = h;
+      }
+      heightDataSize = size;
+    } else {
+      // Fallback: normalize blended base (like before) if ML missing
+      heightData = new Float32Array(size * size);
+      let minH = Infinity, maxH = -Infinity;
+      const baseWeight = 0.85;
+      const dWeight = 0.55 * 0.7; // slightly toned down
+      for (let i = 0; i < size * size; i++) {
+        const br = blurImg[i*4]/255, bg = blurImg[i*4+1]/255, bb = blurImg[i*4+2]/255;
+        const base = 0.2126*br + 0.7152*bg + 0.0722*bb;
+        const h = baseWeight * base + dWeight * (detail01[i]);
+        if (h < minH) minH = h; if (h > maxH) maxH = h;
+        heightData[i] = h;
+      }
+      const range = Math.max(1e-5, maxH - minH);
+      for (let i = 0; i < heightData.length; i++) heightData[i] = (heightData[i] - minH) / range;
+      heightDataSize = size;
+    }
+
+    // Smoothing to reduce spikes
+    if (USE_MEDIAN) heightData = median3x3(heightData, size);
+    heightData = blurSeparable(heightData, size, SMOOTH_PASSES);
+    // Re-normalize to 0..1 after smoothing
+    {
+      let minV = Infinity, maxV = -Infinity;
+      for (let i = 0; i < heightData.length; i++) { const v = heightData[i]; if (v < minV) minV = v; if (v > maxV) maxV = v; }
+      const range = Math.max(1e-6, maxV - minV);
+      for (let i = 0; i < heightData.length; i++) heightData[i] = (heightData[i] - minV) / range;
+    }
+
+    // Construct mesh from heightData (continues below)
+  } finally {
+    // Hide the processing overlay right before we kick off the cinematic and show the world
+    hideProcessingImage();
+  }
+
+  // Construct mesh from heightData
   const size = 512;
   const canvas = document.createElement('canvas');
   canvas.width = size;
   canvas.height = size;
   const ctx = canvas.getContext('2d');
   ctx.drawImage(imageBitmap, 0, 0, size, size);
-
   // Keep this as the minimap background source
   minimapSourceCanvas = canvas;
 
-  let usedML = false;
-  let depth01 = null;
-  try {
-    if (window.ort) {
-      setStatus('Estimating depth (ONNX)…');
-      depth01 = await inferDepthONNX(canvas, size);
-      usedML = true;
-      console.info('[DepthONNX] success');
-    }
-  } catch (e) {
-    console.warn('[DepthONNX] failed; using blur fallback', e);
-  }
-
-  // Always compute detail map from image (to blend even with ML)
-  const blurCanvas = document.createElement('canvas');
-  blurCanvas.width = size; blurCanvas.height = size;
-  const blurCtx = blurCanvas.getContext('2d');
-  blurCtx.filter = 'blur(12px)';
-  blurCtx.drawImage(canvas, 0, 0);
-  const img = ctx.getImageData(0, 0, size, size).data;
-  const blurImg = blurCtx.getImageData(0, 0, size, size).data;
-  const detail01 = new Float32Array(size * size);
-  for (let i = 0; i < size * size; i++) {
-    const r = img[i*4]/255, g = img[i*4+1]/255, b = img[i*4+2]/255;
-    const br = blurImg[i*4]/255, bg = blurImg[i*4+1]/255, bb = blurImg[i*4+2]/255;
-    const l = 0.2126*r + 0.7152*g + 0.0722*b;
-    const base = 0.2126*br + 0.7152*bg + 0.0722*bb;
-    const d = Math.max(-0.5, Math.min(0.5, (l - base) * DETAIL_BOOST));
-    detail01[i] = d + 0.5; // 0..1
-  }
-
-  if (usedML && depth01) {
-    // Blend depth with detail, then clamp
-    heightData = new Float32Array(size * size);
-    for (let i = 0; i < heightData.length; i++) {
-      let h = depth01[i] + DETAIL_WEIGHT * (detail01[i] - 0.5);
-      h = Math.max(0, Math.min(1, h));
-      heightData[i] = h;
-    }
-    heightDataSize = size;
-  } else {
-    // Fallback: normalize blended base (like before) if ML missing
-    heightData = new Float32Array(size * size);
-    let minH = Infinity, maxH = -Infinity;
-    const baseWeight = 0.85;
-    const dWeight = 0.55 * 0.7; // slightly toned down
-    for (let i = 0; i < size * size; i++) {
-      const br = blurImg[i*4]/255, bg = blurImg[i*4+1]/255, bb = blurImg[i*4+2]/255;
-      const base = 0.2126*br + 0.7152*bg + 0.0722*bb;
-      const h = baseWeight * base + dWeight * (detail01[i]);
-      if (h < minH) minH = h; if (h > maxH) maxH = h;
-      heightData[i] = h;
-    }
-    const range = Math.max(1e-5, maxH - minH);
-    for (let i = 0; i < heightData.length; i++) heightData[i] = (heightData[i] - minH) / range;
-    heightDataSize = size;
-  }
-
-  // Smoothing to reduce spikes
-  if (USE_MEDIAN) heightData = median3x3(heightData, size);
-  heightData = blurSeparable(heightData, size, SMOOTH_PASSES);
-  // Re-normalize to 0..1 after smoothing
-  {
-    let minV = Infinity, maxV = -Infinity;
-    for (let i = 0; i < heightData.length; i++) { const v = heightData[i]; if (v < minV) minV = v; if (v > maxV) maxV = v; }
-    const range = Math.max(1e-6, maxV - minV);
-    for (let i = 0; i < heightData.length; i++) heightData[i] = (heightData[i] - minV) / range;
-  }
-
-  // Construct mesh from heightData
   const texture = new THREE.CanvasTexture(ctx.canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
   texture.needsUpdate = true;
@@ -1712,6 +1752,8 @@ async function captureCameraFrame() {
   const bitmap = await createImageBitmap(c);
   closeCamera();
   updateHudVisibilityForSplash();
+  // Show processing still
+  showProcessingImageFromBitmap(bitmap);
   await createTerrainFromImage(bitmap);
 }
 
