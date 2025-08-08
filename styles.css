@@ -207,3 +207,23 @@ canvas { display: block; }
     right: 12px;
   }
 } 
+
+:root {
+  --crosshair-size: 18px;
+}
+#crosshair {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: var(--crosshair-size);
+  height: var(--crosshair-size);
+  border-radius: 50%;
+  border: 2px solid rgba(255,255,255,0.75);
+  box-shadow: 0 0 0 2px rgba(0,0,0,0.5);
+  pointer-events: none;
+  z-index: 15;
+}
+
+/* Slightly adjust the pistol angle to point more forward */
+:root { --gun-rot-x: -0.02; --gun-rot-y: 0.22; } 
