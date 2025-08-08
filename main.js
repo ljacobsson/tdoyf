@@ -22,6 +22,7 @@ const splashUploadBtn = document.getElementById('splashUploadBtn');
 const enterBtn = document.getElementById('enterBtn');
 const processingOverlay = document.getElementById('processingOverlay');
 const processingCanvas = document.getElementById('processingCanvas');
+const hpFillEl = document.getElementById('hpFill');
 
 // Hide the Play button permanently; click anywhere to lock instead
 if (startBtn) { startBtn.disabled = true; startBtn.style.display = 'none'; }
@@ -573,8 +574,14 @@ const worldBounds = { minX: -terrainSize/2, maxX: terrainSize/2, minZ: -terrainS
 function setStatus(text) {
   statusEl.textContent = text;
 }
+function updateHpBar() {
+  if (!hpFillEl) return;
+  const t = Math.max(0, Math.min(1, playerHP / 100));
+  hpFillEl.style.transform = `scaleX(${t.toFixed(3)})`;
+}
 function updateGameHud() {
-  setStatus(`HP: ${playerHP} | Kills: ${kills} | Enemies: ${agents.length}`);
+  updateHpBar();
+  setStatus(`Kills: ${kills} | Enemies: ${agents.length}`);
 }
 function randomDamage(min = 1, max = 5) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
