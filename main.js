@@ -21,6 +21,16 @@ const splashEl = document.getElementById('splash');
 const splashUploadBtn = document.getElementById('splashUploadBtn');
 const enterBtn = document.getElementById('enterBtn');
 
+// Hide the Play button permanently; click anywhere to lock instead
+if (startBtn) { startBtn.disabled = true; startBtn.style.display = 'none'; }
+
+function attemptAutoPointerLock() {
+  // Only desktop should lock; mobile uses on-screen controls
+  if (!isCoarse) {
+    try { controls.lock(); } catch {}
+  }
+}
+
 function updateHudVisibilityForSplash() {
   const isSplash = !!splashEl && splashEl.classList.contains('show');
   const uiEl = document.getElementById('ui');
@@ -42,6 +52,7 @@ enterBtn?.addEventListener('click', () => {
 faceFileInput?.addEventListener('change', () => {
   splashEl?.classList.remove('show');
   updateHudVisibilityForSplash();
+  attemptAutoPointerLock();
 });
 
 // Mobile controls
@@ -56,14 +67,15 @@ const isCoarse = window.matchMedia('(pointer: coarse)').matches;
 if (isCoarse) mobileControlsEl?.classList.remove('hidden');
 let mobileMove = { x: 0, y: 0 };
 let mobileLook = { x: 0, y: 0 };
+let mobileShootHeld = false;
 
-function bindStick(stickEl, knobEl, onMove) {
+function bindStickPointer(stickEl, knobEl, onMove) {
   if (!stickEl || !knobEl) return;
-  let active = false;
+  let activePointerId = null;
   let center = { x: 0, y: 0 };
   const radius = 70;
 
-  function updateKnob(dx, dy) {
+  function setKnob(dx, dy) {
     const len = Math.hypot(dx, dy);
     const clamped = Math.min(1, len / radius);
     const angle = Math.atan2(dy, dx);
@@ -78,33 +90,42 @@ function bindStick(stickEl, knobEl, onMove) {
     onMove({ x: 0, y: 0 });
   }
 
-  const start = (e) => {
-    active = true;
-    const t = e.touches ? e.touches[0] : e;
+  function pointerDown(e) {
+    if (activePointerId !== null) return; // already tracking another pointer
+    activePointerId = e.pointerId;
     const rect = stickEl.getBoundingClientRect();
     center.x = rect.left + rect.width / 2;
     center.y = rect.top + rect.height / 2;
-    updateKnob(t.clientX - center.x, t.clientY - center.y);
-  };
-  const move = (e) => {
-    if (!active) return;
-    const t = e.touches ? e.touches[0] : e;
-    updateKnob(t.clientX - center.x, t.clientY - center.y);
-  };
-  const end = () => { active = false; reset(); };
+    stickEl.setPointerCapture(e.pointerId);
+    setKnob(e.clientX - center.x, e.clientY - center.y);
+  }
+  function pointerMove(e) {
+    if (activePointerId !== e.pointerId) return;
+    setKnob(e.clientX - center.x, e.clientY - center.y);
+  }
+  function pointerUp(e) {
+    if (activePointerId !== e.pointerId) return;
+    activePointerId = null;
+    reset();
+  }
 
-  stickEl.addEventListener('touchstart', start, { passive: true });
-  stickEl.addEventListener('touchmove', move, { passive: true });
-  stickEl.addEventListener('touchend', end);
-  stickEl.addEventListener('mousedown', start);
-  window.addEventListener('mousemove', move);
-  window.addEventListener('mouseup', end);
+  stickEl.addEventListener('pointerdown', pointerDown);
+  stickEl.addEventListener('pointermove', pointerMove);
+  stickEl.addEventListener('pointerup', pointerUp);
+  stickEl.addEventListener('pointercancel', pointerUp);
 }
 
-bindStick(stickLEl, knobL, (v) => { mobileMove = v; });
-bindStick(stickREl, knobR, (v) => { mobileLook = v; });
-btnShoot?.addEventListener('click', () => { tryShoot(); });
-btnJump?.addEventListener('click', () => { keys.add('Space'); setTimeout(() => keys.delete('Space'), 120); });
+bindStickPointer(stickLEl, knobL, (v) => { mobileMove = v; });
+bindStickPointer(stickREl, knobR, (v) => { mobileLook = v; });
+
+btnShoot?.addEventListener('pointerdown', () => { mobileShootHeld = true; });
+const stopShoot = () => { mobileShootHeld = false; };
+btnShoot?.addEventListener('pointerup', stopShoot);
+btnShoot?.addEventListener('pointercancel', stopShoot);
+btnShoot?.addEventListener('pointerleave', stopShoot);
+
+btnJump?.addEventListener('pointerdown', () => { keys.add('Space'); });
+btnJump?.addEventListener('pointerup', () => { keys.delete('Space'); });
 
 // --- Renderer & Scene ---
 const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -449,7 +470,7 @@ function playOhNo() {
       u.rate = 0.95 + Math.random() * 0.2;
       u.pitch = 0.7 + Math.random() * 0.3;
       u.volume = 0.9;
-      window.speechSynthesis.speak(u);
+      //window.speechSynthesis.speak(u);
       return;
     }
   } catch {}
@@ -802,8 +823,8 @@ function startIntroCinematic(fromPos, toPos, fov0 = 40, fov1 = 70) {
       controls.getObject().position.copy(toPos);
       camera.fov = fov1;
       camera.updateProjectionMatrix();
-      startBtn.disabled = false;
-      setStatus('Image loaded. Click Play to lock mouse.');
+      if (startBtn) { startBtn.disabled = true; startBtn.style.display = 'none'; }
+      setStatus(isCoarse ? 'Touch sticks to move/look. Buttons to shoot/jump.' : 'Click to lock mouse. Left-click to shoot. WASD to move, Space to jump, Esc to release.');
     }
   };
 }
@@ -1140,11 +1161,17 @@ controls.addEventListener('lock', () => {
 });
 controls.addEventListener('unlock', () => {
   if (isCoarse) setStatus('Touch sticks to move/look. Buttons to shoot/jump.');
-  else setStatus('Mouse unlocked. Click Play to lock again.');
+  else setStatus('Mouse unlocked. Click anywhere to lock again.');
 });
 
 renderer.domElement.addEventListener('mousedown', (e) => {
-  if (!controls.isLocked || isCinematic) return;
+  if (isCinematic) return;
+  // If not locked on desktop, first click locks pointer
+  if (!isCoarse && !controls.isLocked) {
+    controls.lock();
+    return;
+  }
+  if (!controls.isLocked) return;
   if (e.button !== 0) return; // left click
   tryShoot();
 });
@@ -1444,6 +1471,9 @@ function animate() {
   lastTime = now;
 
   shootCooldown = Math.max(0, shootCooldown - dt);
+  if (isCoarse && mobileShootHeld && controls && !isCinematic) {
+    tryShoot();
+  }
   updateCinematic(dt);
   applyMobileLook(dt);
   updatePlayer(dt);

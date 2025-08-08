@@ -152,36 +152,53 @@ canvas { display: block; }
 }
 #mobileControls .stick {
   position: absolute;
-  width: 140px;
-  height: 140px;
+  width: 170px;
+  height: 170px;
   border-radius: 50%;
   border: 1px solid rgba(255,255,255,0.15);
-  background: rgba(0,0,0,0.35);
+  background: rgba(0,0,0,0.28);
   pointer-events: auto;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
 }
-#stickL { left: 16px; bottom: 16px; }
-#stickR { right: 16px; bottom: 16px; }
+#stickL { left: 18px; bottom: 18px; }
+#stickR { right: 18px; bottom: 18px; }
 #mobileControls .knob {
   position: absolute;
   left: 50%; top: 50%;
-  width: 64px; height: 64px;
+  width: 72px; height: 72px;
   border-radius: 50%;
   background: rgba(255,255,255,0.12);
   border: 1px solid rgba(255,255,255,0.25);
   transform: translate(-50%, -50%);
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
 }
 .mobile-btn {
   position: absolute;
   pointer-events: auto;
-  right: 16px;
-  bottom: 180px;
-  padding: 10px 14px;
+  right: 22px;
+  bottom: 200px;
+  padding: 14px 18px;
   background: rgba(0,0,0,0.55);
   border: 1px solid rgba(255,255,255,0.2);
   color: #e5e7eb;
-  border-radius: 10px;
+  border-radius: 12px;
+  font-size: 16px;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
 }
-.mobile-btn.primary { right: 16px; bottom: 240px; background: #4f46e5; border-color: #6366f1; }
+.mobile-btn.primary { right: 22px; bottom: 280px; background: #4f46e5; border-color: #6366f1; }
+
+@media (orientation: landscape) and (pointer: coarse) {
+  #mobileControls .stick { width: 180px; height: 180px; }
+  #mobileControls .knob { width: 76px; height: 76px; }
+  .mobile-btn { bottom: 160px; right: 24px; padding: 14px 20px; font-size: 18px; }
+  .mobile-btn.primary { bottom: 240px; right: 24px; }
+}
 
 @media (pointer: coarse) and (max-width: 900px) {
   #mobileControls.hidden { display: block; }
