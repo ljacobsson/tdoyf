@@ -115,17 +115,67 @@ function bindStickPointer(stickEl, knobEl, onMove) {
   stickEl.addEventListener('pointercancel', pointerUp);
 }
 
+// Only use left stick for movement
 bindStickPointer(stickLEl, knobL, (v) => { mobileMove = v; });
-bindStickPointer(stickREl, knobR, (v) => { mobileLook = v; });
 
-btnShoot?.addEventListener('pointerdown', () => { mobileShootHeld = true; });
-const stopShoot = () => { mobileShootHeld = false; };
-btnShoot?.addEventListener('pointerup', stopShoot);
-btnShoot?.addEventListener('pointercancel', stopShoot);
-btnShoot?.addEventListener('pointerleave', stopShoot);
+// Swipe-to-look and tap-to-shoot on mobile
+let lookPointerId = null;
+let lookLastX = 0, lookLastY = 0;
+let lookDownTime = 0;
+let lookTotalDist = 0;
+const TAP_TIME_MS = 220;
+const TAP_MOVE_PX = 14;
 
-btnJump?.addEventListener('pointerdown', () => { keys.add('Space'); });
-btnJump?.addEventListener('pointerup', () => { keys.delete('Space'); });
+function isInside(el, target) {
+  if (!el || !target) return false;
+  return el === target || el.contains?.(target);
+}
+
+function onLookPointerDown(e) {
+  if (!isCoarse) return;
+  // Ignore if starting on left stick
+  if (isInside(stickLEl, e.target)) return;
+  if (lookPointerId !== null) return;
+  lookPointerId = e.pointerId;
+  lookLastX = e.clientX;
+  lookLastY = e.clientY;
+  lookDownTime = performance.now();
+  lookTotalDist = 0;
+}
+function onLookPointerMove(e) {
+  if (!isCoarse) return;
+  if (lookPointerId !== e.pointerId) return;
+  const dx = e.clientX - lookLastX;
+  const dy = e.clientY - lookLastY;
+  lookLastX = e.clientX;
+  lookLastY = e.clientY;
+  lookTotalDist += Math.hypot(dx, dy);
+  const yawSpeed = 0.0045; // radians per px
+  const pitchSpeed = 0.0035;
+  manualYaw += -dx * yawSpeed;
+  manualPitch += -dy * pitchSpeed;
+  manualPitch = Math.max(-Math.PI/2 + 0.1, Math.min(Math.PI/2 - 0.1, manualPitch));
+  controls.getObject().rotation.y = manualYaw;
+  camera.rotation.x = manualPitch;
+}
+function onLookPointerUp(e) {
+  if (!isCoarse) return;
+  if (lookPointerId !== e.pointerId) return;
+  const elapsed = performance.now() - lookDownTime;
+  if (elapsed <= TAP_TIME_MS && lookTotalDist <= TAP_MOVE_PX) {
+    tryShoot();
+  }
+  lookPointerId = null;
+}
+
+window.addEventListener('pointerdown', onLookPointerDown, { passive: true });
+window.addEventListener('pointermove', onLookPointerMove, { passive: true });
+window.addEventListener('pointerup', onLookPointerUp, { passive: true });
+window.addEventListener('pointercancel', onLookPointerUp, { passive: true });
+
+// Remove old mobile buttons behavior
+btnShoot?.remove();
+btnJump?.remove();
 
 // --- Renderer & Scene ---
 const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -243,7 +293,7 @@ scene.add(dir);
 const gltfLoader = new GLTFLoader();
 const monsterPrefabs = [];
 const MONSTER_MODELS = [
-    { key: 'duck-local', url: './assets/models/CesiumMan.glb', scale: 2.2, yRot:0 },
+    { key: 'duck-local', url: './assets/models/CesiumMan.glb', scale: 4.2, yRot:0 },
 //    { key: 'monster-local', url: './assets/models/Monster.glb', scale: 0.75, yRot: 0 },
 ];
 async function preloadMonsterModels() {
@@ -759,17 +809,23 @@ async function createTerrainFromImage(imageBitmap) {
   terrainMesh = mesh; scene.add(terrainMesh);
 
   playerStartPos.set(0, getHeightAt(0, 0) + eyeHeight, terrainSize * 0.35);
-  const farPos = new THREE.Vector3(0, terrainSize * 0.9, terrainSize * 1.4);
-  controls.getObject().position.copy(farPos);
-  camera.fov = 40; camera.updateProjectionMatrix();
-  setStatus('Playing intro…'); startBtn.disabled = true;
-  startIntroCinematic(farPos, playerStartPos, 40, 70);
+
+  // Zenith start: high above directly over the player's XZ, looking straight down
+  const zenith = new THREE.Vector3(playerStartPos.x, terrainSize * 2.2, playerStartPos.z);
+  controls.getObject().position.copy(zenith);
+  camera.fov = 38; camera.updateProjectionMatrix();
+  setStatus('Playing intro…'); if (startBtn) startBtn.disabled = true;
+
+  // Build a control point ahead of the player to create a nice arc
+  const ahead = new THREE.Vector3(0, 0, -terrainSize * 0.35);
+  const ctrl = playerStartPos.clone().add(ahead).add(new THREE.Vector3(0, terrainSize * 0.5, 0));
+  startIntroCinematic(zenith, playerStartPos, ctrl, 38, 70);
 
   if (agents.length === 0) {
     try { await assetsReady; } catch {}
     spawnAgents(24);
-    // Initialize fire timers in range [3,15]
-    for (const a of agents) a.fireCooldown = THREE.MathUtils.randFloat(1.0, 5.0);
+    // Initialize fire timers in range [3,15] but biased shorter
+    for (const a of agents) { const t = Math.random(); a.fireCooldown = 3.0 + (15.0 - 3.0) * (t * t); }
   } else {
     for (const a of agents) placeAgentOnSurface(a, a.object.position.x, a.object.position.z, true);
   }
@@ -809,22 +865,48 @@ function easeInOutCubic(x) {
   return x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2;
 }
 
-function startIntroCinematic(fromPos, toPos, fov0 = 40, fov1 = 70) {
+function bezierQuadratic(p0, p1, p2, t) {
+  const u = 1 - t;
+  const uu = u * u;
+  const tt = t * t;
+  const p = new THREE.Vector3();
+  p.addScaledVector(p0, uu);
+  p.addScaledVector(p1, 2 * u * t);
+  p.addScaledVector(p2, tt);
+  return p;
+}
+
+function lerpAngle(a, b, t) {
+  let d = b - a;
+  d = Math.atan2(Math.sin(d), Math.cos(d));
+  return a + d * t;
+}
+
+// In cinematic completion, set appropriate hint per platform
+function startIntroCinematic(fromPos, toPos, ctrlPos = null, fov0 = 40, fov1 = 70) {
   isCinematic = true;
   cinematic = {
     from: fromPos.clone(),
     to: toPos.clone(),
+    ctrl: ctrlPos ? ctrlPos.clone() : null,
     fov0,
     fov1,
-    durationSec: 3.5,
+    durationSec: 4.8,
     elapsedSec: 0,
     onComplete: () => {
       isCinematic = false;
       controls.getObject().position.copy(toPos);
+      // Final orientation: look straight forward (yaw 0, pitch 0)
+      controls.getObject().rotation.y = 0;
+      camera.rotation.x = 0;
+      camera.rotation.z = 0;
+      // Sync manual yaw/pitch so mobile/non-locked matches
+      manualYaw = controls.getObject().rotation.y;
+      manualPitch = camera.rotation.x;
       camera.fov = fov1;
       camera.updateProjectionMatrix();
       if (startBtn) { startBtn.disabled = true; startBtn.style.display = 'none'; }
-      setStatus(isCoarse ? 'Touch sticks to move/look. Buttons to shoot/jump.' : 'Click to lock mouse. Left-click to shoot. WASD to move, Space to jump, Esc to release.');
+      setStatus(isCoarse ? 'Swipe to look, tap to shoot. Left stick to move.' : 'Click to lock mouse. Left-click to shoot. WASD to move, Space to jump, Esc to release.');
     }
   };
 }
@@ -835,11 +917,33 @@ function updateCinematic(dt) {
   const tRaw = Math.min(1, cinematic.elapsedSec / cinematic.durationSec);
   const t = easeInOutCubic(tRaw);
 
-  const pos = new THREE.Vector3().lerpVectors(cinematic.from, cinematic.to, t);
+  // Position along a bezier if control point provided, else linear
+  const pos = cinematic.ctrl
+    ? bezierQuadratic(cinematic.from, cinematic.ctrl, cinematic.to, t)
+    : new THREE.Vector3().lerpVectors(cinematic.from, cinematic.to, t);
   controls.getObject().position.copy(pos);
 
-  const lookTarget = new THREE.Vector3(0, getHeightAt(pos.x, pos.z) + eyeHeight, 0);
-  camera.lookAt(lookTarget);
+  // Look: begin straight down, finish looking toward the player start
+  const groundHere = new THREE.Vector3(pos.x, getHeightAt(pos.x, pos.z) + eyeHeight, pos.z);
+  const lookTo = new THREE.Vector3(cinematic.to.x, getHeightAt(cinematic.to.x, cinematic.to.z) + eyeHeight, cinematic.to.z);
+  const lookBlend = THREE.MathUtils.smoothstep(t, 0.25, 0.85);
+  const lookTarget = new THREE.Vector3().lerpVectors(groundHere, lookTo, lookBlend);
+
+  // Compute yaw/pitch from direction
+  const dir = new THREE.Vector3().subVectors(lookTarget, pos);
+  let yaw = Math.atan2(dir.x, dir.z);
+  const flatLen = Math.hypot(dir.x, dir.z);
+  let pitch = Math.atan2(dir.y, flatLen);
+
+  // Blend to final forward-facing orientation (yaw 0, pitch 0) near the end
+  const faceBlend = THREE.MathUtils.smoothstep(t, 0.7, 1.0);
+  yaw = lerpAngle(yaw, 0, faceBlend);
+  pitch = THREE.MathUtils.lerp(pitch, 0, faceBlend);
+
+  controls.getObject().rotation.y = yaw;
+  camera.rotation.x = pitch;
+  camera.rotation.z = 0;
+
   camera.fov = THREE.MathUtils.lerp(cinematic.fov0, cinematic.fov1, t);
   camera.updateProjectionMatrix();
 
@@ -915,6 +1019,9 @@ function spawnAgents(count) {
       lastPos: new THREE.Vector3(),
       stuckTime: 0,
       animTime: Math.random() * 10,
+      panicTime: 0,
+      panicDir: new THREE.Vector3(),
+      contactCooldown: 0,
     };
     // Tag all descendant meshes with a back-reference to this agent for hit detection
     object.traverse(node => { node.userData.agent = agent; });
@@ -923,12 +1030,12 @@ function spawnAgents(count) {
     const z = THREE.MathUtils.lerp(worldBounds.minZ + 10, worldBounds.maxZ - 10, Math.random());
     placeAgentOnSurface(agent, x, z, true);
     agent.lastPos.copy(agent.object.position);
-    setNewGoal(agent, 0.5);
+    setNewGoal(agent, 0.95);
     agents.push(agent);
   }
 }
 
-function setNewGoal(agent, towardPlayerBias = 0.5) {
+function setNewGoal(agent, towardPlayerBias = 0.9) {
   const pickPlayer = Math.random() < towardPlayerBias;
   if (pickPlayer) {
     const p = controls.getObject().position;
@@ -940,7 +1047,7 @@ function setNewGoal(agent, towardPlayerBias = 0.5) {
       THREE.MathUtils.lerp(worldBounds.minZ + 8, worldBounds.maxZ - 8, Math.random())
     );
   }
-  agent.repathTimer = 1.5 + Math.random() * 1.5;
+  agent.repathTimer = 0.8 + Math.random() * 0.8;
 }
 
 function placeAgentOnSurface(agent, x, z, randomizeHeading = false) {
@@ -1007,15 +1114,42 @@ function bestSlopeDirection(pos, desiredDir) {
 
 function updateAgents(dt) {
   const maxSpeed = 12;
-  const turnLerp = 0.15;
+  const turnLerp = 0.35;
   for (const a of agents) {
     const pos = a.object.position;
+
+    // React to incoming player bullets: set panic direction and timer on near-miss
+    for (let i = 0; i < bullets.length; i++) {
+      const b = bullets[i];
+      if (b.owner !== 'player' || b.life <= 0) continue;
+      // Closest point on segment to agent position
+      const seg = new THREE.Vector3().subVectors(b.to, b.from);
+      const segLen2 = Math.max(1e-6, seg.lengthSq());
+      const toAgent = new THREE.Vector3().subVectors(pos, b.from);
+      let t = toAgent.dot(seg) / segLen2;
+      t = Math.max(0, Math.min(1, t));
+      const closest = new THREE.Vector3().copy(b.from).addScaledVector(seg, t);
+      const d = closest.distanceTo(pos);
+      if (d < 4.5) {
+        // Choose lateral direction perpendicular to bullet dir in XZ plane
+        const up = new THREE.Vector3(0,1,0);
+        const lateral = new THREE.Vector3().crossVectors(b.dir, up);
+        const toAway = new THREE.Vector3().subVectors(pos, closest).setY(0);
+        const side = Math.sign(lateral.dot(toAway)) || (Math.random() < 0.5 ? -1 : 1);
+        const baseDir = lateral.multiplyScalar(side).setY(0).normalize();
+        // Add slight away-from-player bias for variety
+        const awayPlayer = new THREE.Vector3().subVectors(pos, controls.getObject().position).setY(0).normalize();
+        a.panicDir.copy(baseDir.multiplyScalar(0.8).add(awayPlayer.multiplyScalar(0.2))).normalize();
+        a.panicTime = 1.0; // longer evasion window
+        break;
+      }
+    }
 
     // Repath logic
     a.repathTimer -= dt;
     const toGoal = a.goal ? new THREE.Vector3().subVectors(a.goal, new THREE.Vector3(pos.x, 0, pos.z)) : new THREE.Vector3();
     const distGoal = a.goal ? toGoal.length() : Infinity;
-    if (a.repathTimer <= 0 || distGoal < 6) setNewGoal(a, 0.6);
+    if (a.repathTimer <= 0 || distGoal < 6) setNewGoal(a, 0.95);
 
     // Steering: seek + edge push + separation + mild wander
     let steer = new THREE.Vector3();
@@ -1023,6 +1157,13 @@ function updateAgents(dt) {
     steer.add(edgePush(pos));
     steer.add(separationForce(a));
     steer.add(new THREE.Vector3((Math.random()-0.5)*0.4, 0, (Math.random()-0.5)*0.4));
+
+    // Add evasion while panicking
+    if (a.panicTime > 0) {
+      const k = a.panicTime / 1.0;
+      steer.add(a.panicDir.clone().multiplyScalar(3.2 * k));
+      a.panicTime = Math.max(0, a.panicTime - dt);
+    }
 
     if (steer.lengthSq() === 0) steer.set(1,0,0);
     steer.normalize();
@@ -1041,7 +1182,12 @@ function updateAgents(dt) {
     const forward = new THREE.Vector3(Math.sin(a.object.rotation.y), 0, Math.cos(a.object.rotation.y));
     const yAhead = getHeightAt(pos.x + forward.x * 1.5, pos.z + forward.z * 1.5);
     const slopePenalty = THREE.MathUtils.clamp(Math.abs(yAhead - getHeightAt(pos.x, pos.z)) * 1.2, 0, 1);
-    const speed = maxSpeed * (1 - slopePenalty * 0.6);
+    let speed = maxSpeed * (1 - slopePenalty * 0.6);
+    // Slight speed boost while panicking
+    if (a.panicTime > 0) {
+      const k = a.panicTime / 1.0;
+      speed *= 1 + 0.6 * k;
+    }
     pos.x += forward.x * speed * dt;
     pos.z += forward.z * speed * dt;
 
@@ -1050,6 +1196,20 @@ function updateAgents(dt) {
     pos.z = THREE.MathUtils.clamp(pos.z, worldBounds.minZ + 2, worldBounds.maxZ - 2);
     const baseH = a.object.userData.baseHeight ?? 1.2;
     pos.y = getHeightAt(pos.x, pos.z) + baseH;
+
+    // Contact damage if too close to player
+    a.contactCooldown = Math.max(0, a.contactCooldown - dt);
+    const playerPos = controls.getObject().position;
+    const distToPlayer = pos.distanceTo(playerPos);
+    if (distToPlayer < 2.2 && a.contactCooldown <= 0 && !isDead) {
+      playerHP = Math.max(0, playerHP - 1);
+      a.contactCooldown = 0.35;
+      updateGameHud();
+      if (playerHP <= 0 && !isDead) {
+        isDead = true;
+        setStatus('GAME OVER — Press R to restart');
+      }
+    }
 
     // Compute motion speed from last position
     const moved2D = a.lastPos.distanceTo(new THREE.Vector3(pos.x, 0, pos.z));
@@ -1100,7 +1260,8 @@ function updateAgents(dt) {
     // Firing (at player)
     a.fireCooldown -= dt;
     if (a.fireCooldown <= 0) {
-      a.fireCooldown = THREE.MathUtils.randFloat(3.0, 15.0);
+      const tBias = Math.random();
+      a.fireCooldown = 3.0 + (15.0 - 3.0) * (tBias * tBias); // skew toward shorter within 3..15
       enemyTryShoot(a);
     }
   }
@@ -1120,12 +1281,16 @@ function pickTarget(fromAgent) {
   return best;
 }
 
-function fireBullet(from, to, color = 0xffcc66, life = 0.12) {
+// Extend bullets to include metadata for evasion
+function fireBullet(from, to, color = 0xffcc66, life = 0.12, owner = 'player') {
   const geom = new THREE.BufferGeometry().setFromPoints([from.clone(), to.clone()]);
   const mat = new THREE.LineBasicMaterial({ color, transparent: true, opacity: 1, depthTest: false, blending: THREE.AdditiveBlending });
   const line = new THREE.Line(geom, mat);
   scene.add(line);
-  bullets.push({ line, life });
+  const dir = new THREE.Vector3().subVectors(to, from);
+  const dist = Math.max(1e-6, dir.length());
+  dir.divideScalar(dist);
+  bullets.push({ line, life, from: from.clone(), to: to.clone(), dir, owner });
 }
 
 function updateBullets(dt) {
@@ -1160,7 +1325,7 @@ controls.addEventListener('lock', () => {
   setStatus('Mouse locked. Left-click to shoot. WASD to move, Space to jump, Esc to release.');
 });
 controls.addEventListener('unlock', () => {
-  if (isCoarse) setStatus('Touch sticks to move/look. Buttons to shoot/jump.');
+  if (isCoarse) setStatus('Swipe to look, tap to shoot. Left stick to move.');
   else setStatus('Mouse unlocked. Click anywhere to lock again.');
 });
 
@@ -1204,7 +1369,7 @@ function tryShoot() {
   spawnShellEject();
   addRecoil(1);
   playShotSound();
-  fireBullet(muzzle, hitPoint, 0x66ccff, 0.08);
+  fireBullet(muzzle, hitPoint, 0x66ccff, 0.08, 'player');
 }
 
 function removeAgent(agent) {
@@ -1224,7 +1389,7 @@ function removeAgent(agent) {
     playOhNo();
     // Win condition
     if (agents.length === 0 && !isDead) {
-      setStatus(`YOU WIN! HP: ${playerHP} | Kills: ${kills}`);
+      showEndModal('You Win!', `HP: ${playerHP} | Kills: ${kills}`);
     }
   }
 }
@@ -1274,7 +1439,8 @@ function updatePlayer(dt) {
   // Ground follow + jump/gravity
   const groundY = getHeightAt(currentPos.x, currentPos.z) + eyeHeight;
   if (isOnGround) {
-    if (keys.has('Space')) {
+    // Skip jump on mobile
+    if (!isCoarse && keys.has('Space')) {
       jumpVelocity = 10;
       isOnGround = false;
     } else {
@@ -1303,10 +1469,10 @@ function enemyTryShoot(agent) {
   if (dist < 1) return;
   dir.normalize();
 
-  // Only shoot if facing the player within ~30 degrees
+  // Only shoot if facing the player within ~60 degrees
   const forward = new THREE.Vector3(Math.sin(agent.object.rotation.y), 0, Math.cos(agent.object.rotation.y));
   const dot = forward.dot(dir); // cos(theta)
-  const cosMaxAngle = Math.cos(THREE.MathUtils.degToRad(30));
+  const cosMaxAngle = Math.cos(THREE.MathUtils.degToRad(60));
   if (dot < cosMaxAngle) return;
 
   // LOS against terrain
@@ -1314,21 +1480,19 @@ function enemyTryShoot(agent) {
     const rc = new THREE.Raycaster(start, dir, 0, dist);
     const hit = rc.intersectObject(terrainMesh, true)[0];
     if (hit) {
-      // Blocked by terrain
-      fireBullet(start, hit.point, 0x66ffcc, 0.1);
+      fireBullet(start, hit.point, 0x66ffcc, 0.1, 'enemy');
       playEnemyZapSound();
       return;
     }
   }
 
-  // Hit player
-  fireBullet(start, end, 0x66ffcc, 0.1);
+  fireBullet(start, end, 0x66ffcc, 0.1, 'enemy');
   playEnemyZapSound();
   playerHP = Math.max(0, playerHP - 1);
   updateGameHud();
   if (playerHP <= 0 && !isDead) {
     isDead = true;
-    setStatus('GAME OVER — Press R to restart');
+    showEndModal('Game Over', `HP: 0 | Kills: ${kills}`);
   }
 }
 
@@ -1559,3 +1723,35 @@ cameraCaptureBtn?.addEventListener('click', captureCameraFrame);
 window.addEventListener('keydown', (e) => {
   if (isDead && (e.key === 'r' || e.key === 'R')) location.reload();
 }); 
+
+// --- End modal elements ---
+const endModal = document.getElementById('endModal');
+const endTitle = document.getElementById('endTitle');
+const endSubtitle = document.getElementById('endSubtitle');
+const endCta = document.getElementById('endCta');
+
+function showEndModal(title, subtitle) {
+  try { controls.unlock(); } catch {}
+  if (endTitle) endTitle.textContent = title;
+  if (endSubtitle) endSubtitle.textContent = subtitle;
+  endModal?.classList.remove('hidden');
+}
+
+endCta?.addEventListener('click', () => {
+  // Reset state and return to splash
+  try { closeCamera(); } catch {}
+  // Clear agents, bullets, effects, terrain
+  for (const a of agents) scene.remove(a.object);
+  agents.length = 0;
+  for (const b of bullets) { scene.remove(b.line); }
+  bullets.length = 0;
+  for (const fx of effects) { fx.obj.parent?.remove(fx.obj); }
+  effects.length = 0;
+  if (terrainMesh) { scene.remove(terrainMesh); terrainMesh = null; }
+  kills = 0; playerHP = 100; isDead = false;
+  updateGameHud();
+  // Show splash and hide modal
+  endModal?.classList.add('hidden');
+  splashEl?.classList.add('show');
+  updateHudVisibilityForSplash();
+});

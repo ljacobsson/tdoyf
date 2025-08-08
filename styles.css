@@ -19,13 +19,6 @@ html, body {
   transition: opacity 200ms ease;
 }
 #splash.show { opacity: 1; pointer-events: auto; }
-#splashImg {
-  width: min(60vmin, 520px);
-  height: auto;
-  border-radius: 12px;
-  display: block;
-  box-shadow: 0 12px 50px rgba(0,0,0,0.45);
-}
 .splash-inner {
   background: rgba(0,0,0,0.5);
   border: 1px solid rgba(255,255,255,0.15);
@@ -36,6 +29,25 @@ html, body {
   gap: 12px;
   align-items: center;
   backdrop-filter: blur(6px);
+  max-width: 92vw;
+  max-height: 92vh;
+}
+#splashImg {
+  display: block;
+  border-radius: 12px;
+  box-shadow: 0 12px 50px rgba(0,0,0,0.45);
+  width: auto;
+  height: auto;
+  max-width: min(92vw, 520px);
+  max-height: calc(100vh - 160px);
+  object-fit: contain;
+}
+@media (orientation: landscape) {
+  .splash-inner { padding: 12px; }
+  #splashImg {
+    max-width: min(70vw, 520px);
+    max-height: calc(100vh - 120px);
+  }
 }
 .logo, .subtitle, .actions { display: none; }
 
@@ -164,6 +176,7 @@ canvas { display: block; }
 }
 #stickL { left: 18px; bottom: 18px; }
 #stickR { right: 18px; bottom: 18px; }
+#btnShoot, #btnJump { display: none; }
 #mobileControls .knob {
   position: absolute;
   left: 50%; top: 50%;
@@ -198,6 +211,10 @@ canvas { display: block; }
   #mobileControls .knob { width: 76px; height: 76px; }
   .mobile-btn { bottom: 160px; right: 24px; padding: 14px 20px; font-size: 18px; }
   .mobile-btn.primary { bottom: 240px; right: 24px; }
+  #stickL { left: 18px; bottom: 18px; }
+}
+@media (orientation: portrait) and (pointer: coarse) {
+  #stickL { left: 18px; bottom: 18px; }
 }
 
 @media (pointer: coarse) and (max-width: 900px) {
@@ -206,9 +223,9 @@ canvas { display: block; }
 
 #minimap {
   position: fixed;
-  top: 50%;
+  top: 16px;
   right: 16px;
-  transform: translateY(-50%);
+  transform: none;
   width: 180px;
   height: 180px;
   border: 1px solid rgba(255,255,255,0.2);
@@ -222,6 +239,7 @@ canvas { display: block; }
     width: 130px;
     height: 130px;
     right: 12px;
+    top: 12px;
   }
 } 
 
@@ -244,3 +262,39 @@ canvas { display: block; }
 
 /* Slightly adjust the pistol angle to point more forward */
 :root { --gun-rot-x: -0.02; --gun-rot-y: 0.22; } 
+
+#endModal.hidden { display: none !important; }
+#endModal {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(0,0,0,0.6);
+  z-index: 1200;
+}
+#endModal .modal-card {
+  background: rgba(0,0,0,0.75);
+  border: 1px solid rgba(255,255,255,0.2);
+  border-radius: 14px;
+  padding: 18px 18px 16px;
+  width: min(90vw, 420px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  text-align: center;
+  backdrop-filter: blur(6px);
+}
+#endModal h2 { margin: 0; font-size: 26px; }
+#endModal p { margin: 0 0 8px 0; opacity: 0.9; }
+#endCta.primary {
+  font-size: 16px;
+  font-weight: 700;
+  padding: 12px 18px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #38bdf8, #3b82f6);
+  border: 1px solid #60a5fa;
+  color: #04121e;
+  box-shadow: 0 8px 30px rgba(56, 189, 248, 0.35), 0 0 0 3px rgba(56,189,248,0.22) inset;
+}
+#endCta.primary:active { transform: translateY(1px); } 
